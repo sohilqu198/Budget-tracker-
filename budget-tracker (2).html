@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Budget Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #150D0C; font-family: 'Nunito', sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ── Storage helpers (localStorage as AsyncStorage) ──────────────────────
+    const LS = {
+      get(key, fallback) {
+        try { const v = localStorage.getItem(key); return v !== null ? JSON.parse(v) : fallback; }
+        catch { return fallback; }
+      },
+      set(key, value) {
+        try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+      },
+    };
+
+    const C = {
+      bg:      "#150D0C",
+      sheet:   "#251918",
+      btn:     "#2C1E1B",
+      bsp:     "#3A2724",
+      confirm: "#7B3530",
+      text:    "#EFE5DE",
+      dim:     "#7A6560",
+      accent:  "#D4825A",
+      cardL:   "#B55A0E",
+      cardR:   "#7A3B08",
+      budRow:  "#2C1E1B",
+      danger:  "#6B1F1F",
+      green:   "#2A6B3B",
+    };
+
+    function fmtDisp(v) {
+      if (!v) return "0";
+      const dot = v.includes(".");
+      const [i, d] = v.split(".");
+      const fi = parseInt(i || "0", 10).toLocaleString();
+      return dot ? `${fi}.${d ?? ""}` : fi;
+    }
+    function fmtN(n) { return Math.round(n).toLocaleString(); }
+
+    function groupByDate(arr) {
+      const map = {};
+      [...arr].forEach(t => {
+        const key = new Date(t.date).toDateString();
+        if (!map[key]) map[key] = { ts: new Date(t.date), items: [] };
+        map[key].items.push(t);
+      });
+      return Object.values(map).sort((a, b) => b.ts - a.ts);
+    }
+
+    function Wave({ pct }) {
+      const W = 400, H = 220;
+      const x = Math.max(W * 0.07, Math.min(W * 0.93, W * pct));
+      const b = 40;
+      const path = `M0,0 L${x-8},0 C${x+b},${H*.12} ${x-b},${H*.42} ${x},${H/2} C${x+b},${H*.58} ${x-b},${H*.88} ${x-8},${H} L0,${H} Z`;
+      return (
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
+          style={{ position:"absolute", inset:0, width:"100%", height:"100%", borderRadius:22 }}>
+          <defs><clipPath id="wc"><rect width={W} height={H} rx={22}/></clipPath></defs>
+          <g clipPath="url(#wc)">
+            <rect width={W} height={H} fill={C.cardR}/>
+            <path d={path} fill={C.cardL}/>
+          </g>
+        </svg>
+      );
+    }
+
+    function K({ ch, onTap, wide, pill, bsp, ok }) {
+      const [dn, setDn] = useState(false);
+      return (
+        <button
+          onPointerDown={() => { setDn(true); onTap?.(); }}
+          onPointerUp={() => setDn(false)}
+          onPointerLeave={() => setDn(false)}
+          style={{
+            border: "none", cursor: "pointer", fontFamily: "'Nunito',sans-serif",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: C.text, userSelect: "none", WebkitTapHighlightColor: "transparent",
+            transition: "transform .08s, opacity .08s",
+            transform: dn ? "scale(.91)" : "scale(1)",
+            opacity: dn ? .55 : 1,
+            ...(ok ? {
+              background: C.confirm, borderRadius: 60,
+              gridColumn: 4, gridRow: "2/4",
+            } : bsp ? {
+              background: C.bsp, borderRadius: "50%",
+              gridColumn: 4, gridRow: 1,
+            } : wide ? {
+              background: C.btn, borderRadius: 50,
+              gridColumn: "1/3",
+              fontSize: 30, fontWeight: 400,
+            } : pill ? {
+              background: C.btn, borderRadius: 50,
+              fontSize: 30, fontWeight: 400,
+            } : {
+              background: C.btn, borderRadius: "50%",
+              fontSize: 30, fontWeight: 400,
+            }),
+          }}
+        >{ch}</button>
+      );
+    }
+
+    const BSP_ICON = (
+      <svg width="22" height="18" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 12H8l-5-5 5-5h13v10z"/>
+        <line x1="14.5" y1="9.5" x2="11.5" y2="12.5"/>
+        <line x1="11.5" y1="9.5" x2="14.5" y2="12.5"/>
+      </svg>
+    );
+    const CHECK_ICON = (
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="20 6 9 17 4 12"/>
+      </svg>
+    );
+
+    function Numpad({ onKey, onBsp, onConfirm }) {
+      return (
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(4,1fr)",
+          gridTemplateRows: "repeat(4, 72px)",
+          gap: 8,
+          padding: "8px 12px 28px",
+          background: C.sheet,
+        }}>
+          {["7","8","9"].map(n => <K key={n} ch={n} onTap={() => onKey(n)} />)}
+          <K bsp ch={BSP_ICON} onTap={onBsp} />
+          {["4","5","6"].map(n => <K key={n} ch={n} onTap={() => onKey(n)} />)}
+          <K ok ch={CHECK_ICON} onTap={onConfirm} />
+          {["1","2","3"].map(n => <K key={n} ch={n} onTap={() => onKey(n)} />)}
+          <K wide ch="0" onTap={() => onKey("0")} />
+          <K pill ch="." onTap={() => onKey(".")} />
+        </div>
+      );
+    }
+
+    // ── Tag Manager Sheet ────────────────────────────────────────────────────
+    function TagSheet({ savedTags, setSavedTags, activeTag, setActiveTag, onClose }) {
+      const [draft, setDraft] = useState("");
+      const [deleteMode, setDeleteMode] = useState(false);
+      const [bounceKey, setBounceKey] = useState(null);
+
+      function addTag() {
+        const t = draft.trim();
+        if (!t) return;
+        if (!savedTags.includes(t)) {
+          const next = [t, ...savedTags];
+          setSavedTags(next);
+          setBounceKey(t);
+          setTimeout(() => setBounceKey(null), 400);
+        }
+        setActiveTag(t);
+        setDraft("");
+        onClose();
+      }
+
+      function removeTag(t) {
+        const next = savedTags.filter(x => x !== t);
+        setSavedTags(next);
+        if (activeTag === t) setActiveTag("");
+      }
+
+      return (
+        <div className="tag-sheet-bg" onClick={onClose}>
+          <div className="tag-sheet" onClick={e => e.stopPropagation()}>
+            <div className="tag-sheet-hdr">
+              <span className="tag-sheet-title">🏷 Tags</span>
+              <div style={{ display:"flex", gap:8 }}>
+                {savedTags.length > 0 && (
+                  <button className="tag-mgr-btn" onClick={() => setDeleteMode(d => !d)}
+                    style={{ color: deleteMode ? C.accent : C.dim }}>
+                    {deleteMode ? "Done" : "Edit"}
+                  </button>
+                )}
+                <button className="xbtn" onClick={onClose}>✕</button>
+              </div>
+            </div>
+
+            {/* Create new tag */}
+            <div className="tag-new-row">
+              <input
+                className="tag-input"
+                placeholder="New tag… e.g. Food, Oil, Rent"
+                value={draft}
+                onChange={e => setDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") addTag(); }}
+                autoFocus
+              />
+              <button className="tag-add-btn" onClick={addTag}>Add</button>
+            </div>
+
+            {/* Saved tags */}
+            {savedTags.length > 0 ? (
+              <>
+                <div style={{ fontSize:12, color:C.dim, fontWeight:700, marginBottom:10, letterSpacing:.5 }}>
+                  {deleteMode ? "TAP ✕ TO DELETE" : "YOUR TAGS"}
+                </div>
+                <div className="tag-suggestions">
+                  {!deleteMode && activeTag && (
+                    <button className="tag-sug" style={{ color: C.accent }}
+                      onClick={() => { setActiveTag(""); onClose(); }}>✕ Clear</button>
+                  )}
+                  {savedTags.map(st => (
+                    <button
+                      key={st}
+                      className={`tag-sug${activeTag === st && !deleteMode ? " active" : ""}${bounceKey === st ? " bounce" : ""}`}
+                      onClick={() => {
+                        if (deleteMode) { removeTag(st); return; }
+                        setActiveTag(st); onClose();
+                      }}
+                      style={deleteMode ? { paddingRight: 10, color: C.danger } : {}}
+                    >
+                      {deleteMode ? "✕ " : "🏷 "}{st}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="no-tags">No tags yet — create your first tag above!</div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ── People Manager Sheet ─────────────────────────────────────────────────
+    function PeopleSheet({ people, setPeople, onClose }) {
+      const [draft, setDraft] = useState("");
+      const [deleteMode, setDeleteMode] = useState(false);
+      const [bounceKey, setBounceKey] = useState(null);
+
+      function addPerson() {
+        const p = draft.trim();
+        if (!p || people.includes(p)) { setDraft(""); return; }
+        const next = [...people, p];
+        setPeople(next);
+        setBounceKey(p);
+        setTimeout(() => setBounceKey(null), 400);
+        setDraft("");
+      }
+
+      function removePerson(p) {
+        setPeople(people.filter(x => x !== p));
+      }
+
+      return (
+        <div className="tag-sheet-bg" onClick={onClose}>
+          <div className="tag-sheet" onClick={e => e.stopPropagation()}>
+            <div className="tag-sheet-hdr">
+              <span className="tag-sheet-title">👤 People</span>
+              <div style={{ display:"flex", gap:8 }}>
+                {people.length > 0 && (
+                  <button className="tag-mgr-btn" onClick={() => setDeleteMode(d => !d)}
+                    style={{ color: deleteMode ? C.accent : C.dim }}>
+                    {deleteMode ? "Done" : "Edit"}
+                  </button>
+                )}
+                <button className="xbtn" onClick={onClose}>✕</button>
+              </div>
+            </div>
+            <div className="tag-new-row">
+              <input
+                className="tag-input"
+                placeholder="Add a person…"
+                value={draft}
+                onChange={e => setDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") addPerson(); }}
+                autoFocus
+              />
+              <button className="tag-add-btn" onClick={addPerson}>Add</button>
+            </div>
+            {people.length > 0 ? (
+              <>
+                <div style={{ fontSize:12, color:C.dim, fontWeight:700, marginBottom:10, letterSpacing:.5 }}>
+                  {deleteMode ? "TAP ✕ TO REMOVE" : "PEOPLE"}
+                </div>
+                <div className="tag-suggestions">
+                  {people.map(p => (
+                    <button
+                      key={p}
+                      className={`tag-sug${bounceKey === p ? " bounce" : ""}`}
+                      onClick={() => { if (deleteMode) removePerson(p); }}
+                      style={deleteMode ? { paddingRight:10, color: C.danger } : { cursor: deleteMode ? "pointer" : "default" }}
+                    >
+                      {deleteMode ? "✕ " : "👤 "}{p}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="no-tags">No people yet — add someone above!</div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ── Main App ─────────────────────────────────────────────────────────────
+    function App() {
+      // Load from localStorage on mount
+      const [screen, setScreen]           = useState("onboard");
+      const [budget, setBudget]           = useState(() => LS.get("budget", 0));
+      const [budDraft, setBudDraft]       = useState("");
+      const [txns, setTxns]               = useState(() => LS.get("txns", []));
+      const [val, setVal]                 = useState("");
+      const [person, setPerson]           = useState(null);
+      const [tag, setTag]                 = useState("");
+      // People: fully custom, no hardcoded defaults
+      const [people, setPeople]           = useState(() => LS.get("people", []));
+      // Tags: fully custom, no hardcoded defaults
+      const [savedTags, setSavedTags]     = useState(() => LS.get("savedTags", []));
+      const [tagOpen, setTagOpen]         = useState(false);
+      const [peopleSheetOpen, setPeopleSheetOpen] = useState(false);
+      const [shake, setShake]             = useState(false);
+      const [cur, setCur]                 = useState(true);
+      const [cardSide, setCardSide]       = useState(0);
+      const [confirmClear, setConfirmClear] = useState(false);
+      const [addFlash, setAddFlash]       = useState(false);
+      const dragX = useRef(null);
+
+      // Skip onboard if budget already set
+      useEffect(() => {
+        if (budget > 0) setScreen("entry");
+      }, []);
+
+      // Persist to localStorage whenever state changes
+      useEffect(() => { LS.set("budget", budget); }, [budget]);
+      useEffect(() => { LS.set("txns", txns); }, [txns]);
+      useEffect(() => { LS.set("people", people); }, [people]);
+      useEffect(() => { LS.set("savedTags", savedTags); }, [savedTags]);
+
+      useEffect(() => {
+        const id = setInterval(() => setCur(v => !v), 530);
+        return () => clearInterval(id);
+      }, []);
+
+      const spent = txns.reduce((s, t) => s + t.amount, 0);
+      const left  = budget - spent;
+      const pct   = budget > 0 ? Math.min(1, spent / budget) : 0;
+
+      function pressVal(k) {
+        setVal(p => {
+          if (k === ".") return p.includes(".") ? p : (p || "0") + ".";
+          if (p === "0") return k;
+          if (p.length >= 10) return p;
+          if (p.includes(".") && p.split(".")[1].length >= 2) return p;
+          return p + k;
+        });
+      }
+      function bspVal() { setVal(p => p.length <= 1 ? "" : p.slice(0, -1)); }
+
+      function confirmEntry() {
+        const amt = parseFloat(val);
+        if (!amt || amt <= 0) { setShake(true); setTimeout(() => setShake(false), 420); return; }
+        const newTxn = { id: Date.now(), amount: amt, person, tag, date: Date.now() };
+        setTxns(p => [newTxn, ...p]);
+        // Flash animation on add
+        setAddFlash(true);
+        setTimeout(() => setAddFlash(false), 500);
+        if (tag && !savedTags.includes(tag)) setSavedTags(p => [tag, ...p]);
+        setVal(""); setTag(""); setPerson(null);
+      }
+
+      function pressBud(k) {
+        setBudDraft(p => {
+          if (k === ".") return p.includes(".") ? p : (p || "0") + ".";
+          if (p === "0") return k;
+          if (p.length >= 10) return p;
+          return p + k;
+        });
+      }
+      function bspBud() { setBudDraft(p => p.length <= 1 ? "" : p.slice(0, -1)); }
+
+      function confirmOnboard() {
+        const v = parseFloat(budDraft);
+        if (!v || v <= 0) { setShake(true); setTimeout(() => setShake(false), 420); return; }
+        setBudget(v); setBudDraft(""); setScreen("entry");
+      }
+
+      function saveBudget() {
+        const v = parseFloat(budDraft);
+        if (v > 0) setBudget(v);
+        setBudDraft(""); setScreen("history");
+      }
+
+      function cardDown(e) { dragX.current = e.clientX; }
+      function cardUp(e) {
+        if (dragX.current === null) return;
+        const dx = e.clientX - dragX.current;
+        if (dx < -30) setCardSide(1);
+        if (dx > 30)  setCardSide(0);
+        dragX.current = null;
+      }
+
+      function clearAll() { setTxns([]); setConfirmClear(false); }
+
+      const groups = groupByDate(txns);
+
+      return (
+        <>
+          <style>{`
+            *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+            body{background:${C.bg};font-family:'Nunito',sans-serif;}
+            .root{
+              background:${C.bg};min-height:100dvh;max-width:430px;
+              margin:0 auto;display:flex;flex-direction:column;
+              position:relative;overflow:hidden;color:${C.text};
+            }
+            .display{
+              flex:1;display:flex;flex-direction:column;justify-content:flex-end;
+              padding:0 24px 16px;min-height:185px;position:relative;
+              background:${C.bg};
+              transition:background .3s;
+            }
+            .display.flash{animation:flashbg .5s ease;}
+            @keyframes flashbg{0%{background:${C.bg};}30%{background:#1E1408;}100%{background:${C.bg};}}
+            .topbar{
+              position:absolute;top:0;left:0;right:0;
+              display:flex;justify-content:space-between;align-items:center;
+              padding:50px 24px 0;
+            }
+            .tl{font-size:13px;color:${C.dim};font-weight:600;}
+            .tbtn{
+              background:none;border:none;color:${C.dim};font-size:13px;
+              font-family:'Nunito',sans-serif;font-weight:700;cursor:pointer;padding:4px;
+              transition:color .2s;
+            }
+            .tbtn:hover{color:${C.text};}
+            .tag-btn{
+              display:flex;align-items:center;gap:6px;
+              padding:8px 16px 8px 12px;border-radius:50px;border:none;
+              background:${C.btn};color:${C.text};
+              font-family:'Nunito',sans-serif;font-size:15px;font-weight:700;
+              cursor:pointer;transition:background .15s, transform .1s;
+              -webkit-tap-highlight-color:transparent;
+              white-space:nowrap;flex-shrink:0;
+            }
+            .tag-btn.has-tag{background:#2A1A10;outline:1.5px solid ${C.dim};}
+            .tag-btn:active{transform:scale(.93);}
+            .tag-sheet-bg{
+              position:fixed;inset:0;background:rgba(0,0,0,.6);
+              z-index:55;display:flex;align-items:flex-end;
+              animation:fdin .2s ease;
+            }
+            .tag-sheet{
+              background:#1E1412;border-radius:26px 26px 0 0;
+              padding:20px 20px 36px;width:100%;max-width:430px;margin:0 auto;
+              animation:slup .3s cubic-bezier(.32,.72,0,1);
+            }
+            .tag-sheet-hdr{
+              display:flex;justify-content:space-between;align-items:center;
+              margin-bottom:18px;
+            }
+            .tag-sheet-title{font-size:18px;font-weight:900;color:${C.text};}
+            .tag-new-row{display:flex;gap:10px;align-items:center;margin-bottom:18px;}
+            .tag-input{
+              flex:1;background:#2C1E1B;border:1.5px solid transparent;border-radius:14px;
+              color:${C.text};font-family:'Nunito',sans-serif;
+              font-size:16px;font-weight:700;padding:12px 16px;outline:none;
+              transition:border-color .15s;
+            }
+            .tag-input::placeholder{color:${C.dim};opacity:.5;}
+            .tag-input:focus{border-color:${C.dim};}
+            .tag-add-btn{
+              background:${C.confirm};border:none;border-radius:14px;
+              color:${C.text};font-family:'Nunito',sans-serif;
+              font-size:14px;font-weight:800;padding:12px 18px;
+              cursor:pointer;white-space:nowrap;transition:background .15s;
+              flex-shrink:0;
+            }
+            .tag-add-btn:hover{background:#8F3E38;}
+            .tag-mgr-btn{
+              background:none;border:none;color:${C.dim};
+              font-family:'Nunito',sans-serif;font-size:14px;font-weight:800;
+              cursor:pointer;padding:4px 8px;transition:color .15s;
+            }
+            .tag-suggestions{display:flex;flex-wrap:wrap;gap:8px;}
+            .tag-sug{
+              padding:8px 16px;border-radius:50px;border:none;
+              background:#2C1E1B;color:${C.dim};
+              font-family:'Nunito',sans-serif;font-size:14px;font-weight:700;
+              cursor:pointer;transition:all .15s;
+            }
+            .tag-sug.active{background:#2A1A10;color:${C.text};outline:1.5px solid ${C.dim};}
+            .tag-sug:hover{color:${C.text};}
+            .tag-sug.bounce{animation:bounce .4s cubic-bezier(.36,.07,.19,.97);}
+            @keyframes bounce{0%{transform:scale(1);}30%{transform:scale(1.18);}60%{transform:scale(.95);}100%{transform:scale(1);}}
+            .no-tags{font-size:13px;color:${C.dim};font-weight:600;padding:4px 0;}
+            .arow{display:flex;align-items:baseline;justify-content:flex-end;}
+            .anum{
+              font-size:clamp(60px,16vw,90px);font-weight:900;
+              color:${C.text};line-height:1;letter-spacing:-3px;
+            }
+            .anum.shk{animation:shk .42s cubic-bezier(.36,.07,.19,.97);}
+            @keyframes shk{
+              10%,90%{transform:translateX(-3px);}20%,80%{transform:translateX(4px);}
+              30%,50%,70%{transform:translateX(-6px);}40%,60%{transform:translateX(6px);}
+            }
+            .blink{width:3px;height:.7em;background:#A07060;margin-left:5px;
+              align-self:center;border-radius:2px;flex-shrink:0;}
+            .sheet{background:${C.sheet};flex-shrink:0;}
+            .people{
+              display:flex;gap:8px;padding:14px 14px 14px;
+              overflow-x:auto;scrollbar-width:none;
+              background:${C.sheet};
+              align-items:center;
+            }
+            .people::-webkit-scrollbar{display:none;}
+            .pc{
+              padding:11px 24px;border-radius:14px;
+              background:#3A2820;
+              color:${C.text};font-size:15px;font-weight:700;
+              font-family:'Nunito',sans-serif;border:2px solid transparent;
+              cursor:pointer;white-space:nowrap;flex-shrink:0;
+              -webkit-tap-highlight-color:transparent;
+              transition:background .15s, border-color .15s, transform .1s;
+              outline:none;
+            }
+            .pc:active{transform:scale(.93);}
+            .pc.on{background:#2A1510;border-color:${C.dim};}
+            .pc-add{
+              padding:11px 18px;border-radius:14px;
+              background:transparent;border:2px dashed #3A2820;
+              color:${C.dim};font-size:14px;font-weight:700;
+              font-family:'Nunito',sans-serif;
+              cursor:pointer;white-space:nowrap;flex-shrink:0;
+              -webkit-tap-highlight-color:transparent;
+              transition:border-color .15s, color .15s;
+            }
+            .pc-add:hover{border-color:${C.dim};color:${C.text};}
+            .ov{
+              position:absolute;inset:0;background:${C.bg};
+              display:flex;flex-direction:column;
+              transform:translateY(100%);
+              transition:transform .38s cubic-bezier(.32,.72,0,1);
+              will-change:transform;
+            }
+            .ov.z20{z-index:20;}
+            .ov.z30{z-index:30;}
+            .ov.open{transform:translateY(0);}
+            .ov.onboard-ov{transform:translateY(0);z-index:50;}
+            .ov.onboard-ov.gone{transform:translateY(-100%);pointer-events:none;}
+            .hdr{
+              padding:52px 20px 10px;
+              display:flex;justify-content:space-between;align-items:center;flex-shrink:0;
+            }
+            .htitle{font-size:28px;font-weight:900;}
+            .ibtn{background:none;border:none;color:${C.text};font-size:20px;cursor:pointer;padding:4px;opacity:.85;}
+            .ibtn:hover{opacity:1;}
+            .xbtn{
+              background:#3A2820;border:none;color:${C.dim};
+              width:34px;height:34px;border-radius:50%;font-size:16px;
+              display:flex;align-items:center;justify-content:center;cursor:pointer;
+              transition:color .15s;
+            }
+            .xbtn:hover{color:${C.text};}
+            .bc{
+              margin:0 14px;border-radius:22px;position:relative;overflow:hidden;
+              height:208px;cursor:grab;flex-shrink:0;touch-action:pan-y;user-select:none;
+            }
+            .bci{
+              position:absolute;inset:0;display:flex;flex-direction:column;
+              justify-content:space-between;padding:14px 18px 18px;z-index:1;
+            }
+            .dots{display:flex;gap:7px;justify-content:flex-end;}
+            .dot{width:9px;height:9px;border-radius:50%;background:rgba(255,255,255,.25);transition:background .3s;}
+            .dot.on{background:rgba(255,255,255,.8);}
+            .cnum{font-size:64px;font-weight:900;color:${C.text};line-height:1;letter-spacing:-2px;}
+            .clbl{font-size:17px;font-weight:700;color:rgba(240,228,218,.6);}
+            .cpct{font-size:14px;font-weight:700;color:rgba(240,228,218,.65);}
+            .brow{
+              margin:10px 14px 0;background:${C.budRow};border-radius:16px;
+              padding:14px 18px;display:flex;align-items:baseline;gap:10px;flex-shrink:0;
+            }
+            .brnum{font-size:28px;font-weight:900;letter-spacing:-1px;}
+            .brlbl{font-size:13px;font-weight:700;color:${C.dim};}
+            .lhdr{
+              display:flex;justify-content:space-between;align-items:center;
+              padding:12px 20px 4px;flex-shrink:0;
+            }
+            .llbl{font-size:12px;font-weight:800;color:${C.dim};letter-spacing:.5px;}
+            .tscroll{flex:1;overflow-y:auto;padding:4px 20px 32px;scrollbar-width:none;}
+            .tscroll::-webkit-scrollbar{display:none;}
+            .dgrp{margin-bottom:22px;}
+            .dlbl{font-size:15px;font-weight:800;color:${C.accent};margin-bottom:12px;}
+            .trow{
+              display:flex;justify-content:space-between;align-items:flex-start;
+              padding:10px 0;border-bottom:1px solid rgba(255,255,255,.04);
+              animation:fu .22s ease;
+            }
+            @keyframes fu{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+            .tamt{font-size:36px;font-weight:900;letter-spacing:-1px;line-height:1.1;}
+            .twho{font-size:14px;font-weight:600;color:${C.dim};margin-top:2px;}
+            .ttime{font-size:13px;font-weight:600;color:${C.dim};padding-top:4px;}
+            .empty{
+              flex:1;display:flex;flex-direction:column;align-items:center;
+              justify-content:center;color:${C.dim};gap:10px;font-size:14px;font-weight:700;
+              padding-bottom:40px;
+            }
+            .clear-btn{
+              margin:0 14px 14px;padding:13px;border-radius:50px;border:none;
+              background:${C.danger};color:${C.text};
+              font-family:'Nunito',sans-serif;font-size:15px;font-weight:800;
+              cursor:pointer;transition:background .15s;flex-shrink:0;
+              display:flex;align-items:center;justify-content:center;gap:8px;
+            }
+            .clear-btn:hover{background:#8B2525;}
+            .dialog-bg{
+              position:absolute;inset:0;background:rgba(0,0,0,.7);
+              z-index:60;display:flex;align-items:flex-end;
+              animation:fdin .2s ease;
+            }
+            @keyframes fdin{from{opacity:0;}to{opacity:1;}}
+            .dialog{
+              background:#1E1210;border-radius:26px 26px 0 0;
+              padding:28px 24px 44px;width:100%;
+              animation:slup .28s cubic-bezier(.32,.72,0,1);
+            }
+            @keyframes slup{from{transform:translateY(100%);}to{transform:translateY(0);}}
+            .dialog h3{font-size:20px;font-weight:900;margin-bottom:8px;}
+            .dialog p{font-size:14px;color:${C.dim};font-weight:600;margin-bottom:24px;line-height:1.5;}
+            .dialog-btns{display:flex;gap:10px;}
+            .dbtn{
+              flex:1;padding:14px;border-radius:50px;border:none;
+              font-family:'Nunito',sans-serif;font-size:16px;font-weight:800;
+              cursor:pointer;transition:background .15s;
+            }
+            .dbtn.cancel{background:#3A2820;color:${C.dim};}
+            .dbtn.cancel:hover{color:${C.text};}
+            .dbtn.del{background:${C.danger};color:${C.text};}
+            .dbtn.del:hover{background:#8B2525;}
+            .ob-wrap{
+              flex:1;display:flex;flex-direction:column;align-items:center;
+              justify-content:flex-end;padding:0 24px 20px;
+            }
+            .ob-logo{font-size:48px;margin-bottom:20px;animation:pop .6s cubic-bezier(.36,.07,.19,.97);}
+            @keyframes pop{0%{transform:scale(0);opacity:0;}70%{transform:scale(1.2);}100%{transform:scale(1);opacity:1;}}
+            .ob-title{font-size:32px;font-weight:900;margin-bottom:6px;text-align:center;}
+            .ob-sub{font-size:15px;color:${C.dim};font-weight:600;text-align:center;margin-bottom:40px;}
+            .ob-amt{
+              font-size:clamp(64px,17vw,96px);font-weight:900;
+              color:${C.text};line-height:1;letter-spacing:-3px;
+              text-align:right;width:100%;
+            }
+            .ob-amt.shk{animation:shk .42s cubic-bezier(.36,.07,.19,.97);}
+            .ob-lbl{font-size:13px;color:${C.dim};font-weight:700;text-align:right;margin-bottom:6px;}
+            .sbdisp{
+              flex:1;display:flex;flex-direction:column;justify-content:flex-end;
+              padding:0 24px 16px;
+            }
+            .sbamt{
+              font-size:clamp(60px,16vw,90px);font-weight:900;
+              color:${C.text};line-height:1;letter-spacing:-3px;text-align:right;
+            }
+            .sbamt.ph{color:${C.dim};opacity:.4;}
+            .sbhint{font-size:13px;color:${C.dim};font-weight:600;margin-bottom:8px;text-align:right;}
+            /* Tag row under amount */
+            .meta-row{
+              display:flex;justify-content:flex-end;align-items:center;
+              gap:8px;margin-top:14px;flex-wrap:wrap;
+            }
+          `}</style>
+
+          <div className="root">
+
+            {/* ── ENTRY SCREEN ── */}
+            <div className={`display${addFlash ? " flash" : ""}`}>
+              <div className="topbar">
+                <span className="tl">{person ? `For ${person}` : "New expense"}</span>
+                <button className="tbtn" onClick={() => setScreen("history")}>
+                  {txns.length > 0 ? `${txns.length} entries ›` : "History"}
+                </button>
+              </div>
+              <div className="arow">
+                <div className={`anum${shake ? " shk" : ""}`}>{fmtDisp(val)}</div>
+                <div className="blink" style={{ opacity: cur ? 1 : 0 }} />
+              </div>
+              <div className="meta-row">
+                <button className={`tag-btn${tag ? " has-tag" : ""}`} onClick={() => setTagOpen(true)}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+                    <line x1="7" y1="7" x2="7.01" y2="7"/>
+                  </svg>
+                  {tag || "Tag"}
+                </button>
+              </div>
+            </div>
+
+            <div className="sheet">
+              {/* People row */}
+              <div className="people">
+                {people.map(p => (
+                  <button key={p} className={`pc${person === p ? " on" : ""}`}
+                    onClick={() => setPerson(v => v === p ? null : p)}>{p}</button>
+                ))}
+                <button className="pc-add" onClick={() => setPeopleSheetOpen(true)}>+ Add</button>
+              </div>
+              <Numpad onKey={pressVal} onBsp={bspVal} onConfirm={confirmEntry} />
+            </div>
+
+            {/* ── HISTORY ── */}
+            <div className={`ov z20${screen === "history" ? " open" : ""}`}>
+              <div className="hdr">
+                <span className="htitle">Budget</span>
+                <button className="ibtn" onClick={() => setScreen("setBudget")}>
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                  </svg>
+                </button>
+              </div>
+
+              <div className="bc" onPointerDown={cardDown} onPointerUp={cardUp}
+                onPointerCancel={() => { dragX.current = null; }}>
+                <Wave pct={pct} />
+                <div className="bci">
+                  <div className="dots">
+                    <div className={`dot${cardSide === 0 ? " on" : ""}`} />
+                    <div className={`dot${cardSide === 1 ? " on" : ""}`} />
+                  </div>
+                  <div style={{
+                    display:"flex", flexDirection:"column", gap:4,
+                    alignSelf: cardSide === 1 ? "flex-end" : "flex-start",
+                    paddingLeft: cardSide === 0 ? 4 : 0,
+                    paddingRight: cardSide === 1 ? 4 : 0,
+                    transition: "all .35s ease",
+                  }}>
+                    <div className="cnum">{cardSide === 0 ? fmtN(left) : fmtN(spent)}</div>
+                    <div className="clbl">{cardSide === 0 ? "Left" : "Spent"}</div>
+                  </div>
+                  <div className="cpct">{(pct * 100).toFixed(2)}% of budget</div>
+                </div>
+              </div>
+
+              <div className="brow">
+                <span className="brnum">{fmtN(budget)}</span>
+                <span className="brlbl">Starting budget</span>
+              </div>
+
+              <div className="lhdr">
+                <span className="llbl">{txns.length} TRANSACTIONS</span>
+                <button className="xbtn" onClick={() => setScreen("entry")}>✕</button>
+              </div>
+
+              <div className="tscroll">
+                {txns.length === 0 ? (
+                  <div className="empty">
+                    <span style={{ fontSize: 44, opacity: .22 }}>🧾</span>
+                    No transactions yet
+                  </div>
+                ) : groups.map(g => {
+                  const dlbl = g.ts.toLocaleDateString("en-GB", { day:"numeric", month:"long" });
+                  return (
+                    <div className="dgrp" key={dlbl}>
+                      <div className="dlbl">{dlbl}</div>
+                      {g.items.map(t => {
+                        const d = new Date(t.date);
+                        const ts = d.toLocaleDateString("en-GB", { day:"2-digit", month:"short" })
+                          + " " + d.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" });
+                        return (
+                          <div className="trow" key={t.id}>
+                            <div>
+                              <div className="tamt">{fmtN(t.amount)}</div>
+                              {t.person && <div className="twho">{t.person}</div>}
+                              {t.tag && <div className="twho" style={{fontSize:12,opacity:.7}}>🏷 {t.tag}</div>}
+                            </div>
+                            <div className="ttime">{ts}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {txns.length > 0 && (
+                <button className="clear-btn" onClick={() => setConfirmClear(true)}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="3 6 5 6 21 6"/>
+                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+                    <path d="M10 11v6M14 11v6"/>
+                    <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                  </svg>
+                  Delete All Entries
+                </button>
+              )}
+            </div>
+
+            {/* ── SET BUDGET ── */}
+            <div className={`ov z30${screen === "setBudget" ? " open" : ""}`}>
+              <div className="hdr">
+                <span className="htitle">Set Budget</span>
+                <button className="xbtn" onClick={() => { setBudDraft(""); setScreen("history"); }}>✕</button>
+              </div>
+              <div className="sbdisp">
+                <div className="sbhint">Enter new budget amount</div>
+                <div className={`sbamt${!budDraft ? " ph" : ""}`}>
+                  {budDraft ? fmtDisp(budDraft) : fmtN(budget)}
+                </div>
+              </div>
+              <div className="sheet">
+                <div style={{ height: 14 }} />
+                <Numpad onKey={pressBud} onBsp={bspBud} onConfirm={saveBudget} />
+              </div>
+            </div>
+
+            {/* ── ONBOARDING ── */}
+            <div className={`ov onboard-ov${screen !== "onboard" ? " gone" : ""}`}
+              style={{ transition: "transform .42s cubic-bezier(.32,.72,0,1)" }}>
+              <div className="ob-wrap">
+                <div className="ob-logo">🌾</div>
+                <div className="ob-title">Budget Tracker</div>
+                <div className="ob-sub">How much is your total budget?</div>
+                <div className="ob-lbl">Enter your budget</div>
+                <div className={`ob-amt${shake ? " shk" : ""}`}>
+                  {budDraft ? fmtDisp(budDraft) : <span style={{ opacity: .25 }}>0</span>}
+                </div>
+              </div>
+              <div className="sheet">
+                <div style={{ height: 14 }} />
+                <Numpad onKey={pressBud} onBsp={bspBud} onConfirm={confirmOnboard} />
+              </div>
+            </div>
+
+            {/* ── TAG SHEET ── */}
+            {tagOpen && (
+              <TagSheet
+                savedTags={savedTags}
+                setSavedTags={setSavedTags}
+                activeTag={tag}
+                setActiveTag={setTag}
+                onClose={() => setTagOpen(false)}
+              />
+            )}
+
+            {/* ── PEOPLE SHEET ── */}
+            {peopleSheetOpen && (
+              <PeopleSheet
+                people={people}
+                setPeople={setPeople}
+                onClose={() => setPeopleSheetOpen(false)}
+              />
+            )}
+
+            {/* ── CONFIRM CLEAR ── */}
+            {confirmClear && (
+              <div className="dialog-bg" onClick={() => setConfirmClear(false)}>
+                <div className="dialog" onClick={e => e.stopPropagation()}>
+                  <h3>Delete all entries?</h3>
+                  <p>This will permanently remove all {txns.length} transaction{txns.length !== 1 ? "s" : ""}. This cannot be undone.</p>
+                  <div className="dialog-btns">
+                    <button className="dbtn cancel" onClick={() => setConfirmClear(false)}>Cancel</button>
+                    <button className="dbtn del" onClick={clearAll}>Delete All</button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+          </div>
+        </>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
